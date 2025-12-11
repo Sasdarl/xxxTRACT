@@ -25,7 +25,10 @@ def wu32(value):
     return struct.pack("<I", value)
 
 
-def xor(key, input_buffer): # Standard XOR decryption
+def xor(key, input_buffer): # Standard XOR encryption/decryption
+    if (len(key) <= 0):
+        return input_buffer
+    
     input_pos = 0
     key_length = len(key)
     output_buffer = bytearray()
@@ -97,17 +100,16 @@ def de_rle(input_buffer):
         return -1 # This should not happen
         
     output_buffer = bytearray()
-    other_buffer = bytearray(0x1000)
+    sym_buffer = bytearray(0x1000)
     head_pos = 4
     input_pos = head_pos
     input_pos += (ru32(input_buffer, 0)+7)>>3
     head_count = 0
-    dictionary = bytearray(0x100)
-    
+
+    for i in range(0x100):
+        sym_buffer[i] = i # Load the dictionary with all possible values
+            
     while (input_pos < len(input_buffer)):
-        for i in range(0x100):
-            dictionary[i] = i # Load the dictionary with all possible values
-        
         curbyte = 2**(head_count) # The header is a filter by bit
         curbyte &= input_buffer[head_pos]
         if (curbyte == 0 and input_pos < len(input_buffer)-1):
@@ -119,15 +121,12 @@ def de_rle(input_buffer):
             length = (curshort&0x0F) # The first four bytes are symbol length
             
             for i in range(length+2):
-                newbyte = dictionary[(off-1+i)%0x100] # Copy bytes
-                if (len(output_buffer) > off-1+i): # I'm told this is a 'revolving window'?
-                    newbyte = other_buffer[(off-1+i)%0x1000]
-                    
-                other_buffer[len(output_buffer)%0x1000] = newbyte
+                newbyte = sym_buffer[(off-1+i)%0x1000] # Copy bytes
+                sym_buffer[len(output_buffer)%0x1000] = newbyte
                 output_buffer.append(newbyte)
         else:
             curbyte = input_buffer[input_pos] # Use and store symbol
-            other_buffer[len(output_buffer)%0x1000] = curbyte
+            sym_buffer[len(output_buffer)%0x1000] = curbyte
             output_buffer.append(curbyte)
             input_pos += 1
         
@@ -139,8 +138,188 @@ def de_rle(input_buffer):
     return output_buffer
 
 
-def unpack_file(input_buffer, output_folder, output_name):
-    output_folder = output_folder+"/"+output_name+f"_decompressed/"
+def re_rle(input_buffer): # Compression is pain
+    output_buffer = bytearray()
+    head_buffer = bytearray()
+    data_buffer = bytearray()
+    sym_buffer = bytearray(0x1000)
+    head_byte = 0
+    head_bit = 0
+    input_pos = 0
+    sync_count = 0
+
+    for i in range(0x100):
+        sym_buffer[i] = i # Load the dictionary with all possible values
+    
+    while (input_pos < len(input_buffer)):
+        curbyte = input_buffer[input_pos]
+        for i in range(input_pos%0x1000, 0x1000):
+            sync_count = 0
+            while (sync_count < 15 
+            and input_pos+sync_count < len(input_buffer) 
+            and input_buffer[input_pos+sync_count] == sym_buffer[(i+sync_count)%0x1000]):
+                sync_count += 1
+            if (i == 0x1000-1 and sync_count <= 2):
+                sym_buffer[input_pos%0x1000] = curbyte
+                data_buffer.append(curbyte)
+                head_byte += 2**head_bit # The header is a filter by bit
+                input_pos += 1
+                break
+            elif (sync_count > 2):
+                for j in range(sync_count): # Copy bytes
+                    sym_buffer[(input_pos+j)%0x1000] = input_buffer[input_pos+j]
+                data_buffer.extend(wu16((sync_count-2) + ((i+1)%0x1000)*0x10))
+                input_pos += sync_count
+                break
+
+        head_bit += 1
+        if (head_bit >= 8): # Increment header position once we're done with a byte
+            head_buffer.append(head_byte)
+            head_byte = 0
+            head_bit = 0
+    
+    if (head_bit > 0):
+        head_buffer.append(head_byte)
+    
+    output_buffer.extend(wu32( (len(head_buffer)<<3)-7 ))
+    output_buffer.extend(head_buffer)
+    output_buffer.extend(data_buffer)
+    return output_buffer
+
+
+def buildholic(input_folder, output_folder, output_file, recurse):
+    if (not Path(input_folder+"/FILENAME.LST").is_file()):
+        print("Could not find file list!")
+        return -1 # We need this list to know which compression to use
+
+    filenames = []
+    head_buffer = bytearray()
+    output_buffer = bytearray()
+    contains_packed = False
+    
+    with open(input_folder+"/FILENAME.LST", "r") as list_file:
+        filenames = list_file.readlines()
+        list_file.close()
+    with open(input_folder+"/FILENAME.LST", "rb") as list_file:
+        filelist = bytearray( list_file.read() )
+        output_buffer.extend(filelist)
+        head_buffer.extend(wu32(len(filelist)))
+        while (len(output_buffer)%0x800 > 0):
+            output_buffer.append(0xFF)
+        list_file.close()
+    
+    for i in range(1, len(filenames)):
+        curname = filenames[i].rsplit('\n',1)[0]
+        with open(input_folder+"/"+curname, "rb") as input_file:
+            input_buffer = bytearray( input_file.read() )
+            if (recurse and filenames[i].endswith(".PAK\n")):
+                print(f"Repacking {curname}...")
+                contains_packed = True
+                input_buffer = repack_file(input_folder+"/"+Path(filenames[i]).stem+"_decompressed", input_folder, filenames[i], recurse, False)
+            
+            output_buffer.extend(input_buffer)
+            head_buffer.extend(wu32(len(input_buffer)))
+            while (len(output_buffer)%0x800 > 0):
+                output_buffer.append(0xFF)
+
+            input_file.close()
+
+    outfile = output_folder + "/" + output_file
+    outfile2 = output_folder + "/" + Path(output_file).stem + ".hd"
+    with open(outfile, "wb") as output:
+        output.write(output_buffer)
+        output.close()
+    with open(outfile2, "wb") as output:
+        output.write(head_buffer)
+        output.close()
+
+    print(f"File successfully rebuilt to {outfile}!")
+    return output_buffer
+
+
+def repack_file(input_folder, output_folder, output_file, recurse, write=True):
+    key = b""
+    
+    if (not Path(input_folder+"/packfiles.lst").is_file()):
+        print("Could not find file list!")
+        return -1 # We need this list to know which compression to use
+        
+    filenames = []
+    file_props = []
+    output_buffer = bytearray()
+    contains_packed = False
+    
+    with open(input_folder+"/packfiles.lst", "rb") as list_file:
+        list_buffer = bytearray( list_file.read() )
+        for j in range(0, len(list_buffer), 0x40): # Serialize our file properties
+            filenames.append(list_buffer[j:j+0x20].decode("utf-8").rstrip("\x00"))
+            file_props.append([ru32(list_buffer, j+0x30),
+            ru32(list_buffer, j+0x34),ru32(list_buffer, j+0x3C)])
+        list_file.close()
+    
+    for i in range(0, len(filenames)):
+        with open(input_folder+"/"+filenames[i], "rb") as input_file:
+            input_buffer = bytearray( input_file.read() )
+            if (filenames[i].endswith(".PAK")):
+                contains_packed = True
+                if (recurse):
+                    print(f"Repacking {filenames[i]}...")
+                    contains_packed = True
+                    repack_file(input_folder+"/"+Path(filenames[i]).stem+"_decompressed", input_folder, filenames[i], recurse, False)
+            
+            file_props[i][0] = len(output_buffer)
+            file_props[i][1] = len(input_buffer)
+                        
+            if file_props[i][2]%0x10 == 2:
+                #re_lzw(input_buffer) # I'm. NOT. doing this.
+                file_props[i][2] -= 2 # I'd love to compress with RLE instead, but the game hates it
+            if file_props[i][2]%0x10 == 1:
+                input_buffer = re_rle(input_buffer)
+            input_buffer = xor(key, input_buffer)
+            output_buffer.extend(input_buffer)
+            input_file.close()
+    
+    head_buffer = bytearray()
+    head_buffer.extend(b"PACK")
+    head_buffer.extend(wu32(len(key)))
+    head_buffer.extend(key)
+    head_buffer.extend(wu32(0x28+len(key)))
+    head_buffer.extend(wu32(len(filenames)*0x40))
+    head_buffer.extend(wu32(0x28+len(key)+(len(filenames)*0x40)))
+    head_buffer.extend(wu32(len(output_buffer)))
+    head_buffer.extend(wu32(contains_packed))
+    head_buffer.extend(wu32(len(filenames)))
+    head_buffer.extend(wu32(0x40))
+    head_buffer.extend(bytearray(0x04))
+    for i in range(len(filenames)):
+        file_head = bytearray()
+        file_head.extend(filenames[i].encode())
+        if (len(filenames[i]) < 0x20):
+            file_head.extend(bytearray(0x20-len(filenames[i])))
+        file_head.extend(bytearray(0x10))
+        file_head.extend(wu32(file_props[i][0]))
+        if (i < len(filenames)-1):
+            file_head.extend(wu32(file_props[i+1][0]-file_props[i][0]))
+        else:
+            file_head.extend(wu32(len(output_buffer)-file_props[i][0]))
+        file_head.extend(wu32(file_props[i][1]))
+        file_head.extend(wu32(file_props[i][2]))
+        file_head = xor(key, file_head)
+        head_buffer.extend(file_head)
+        
+    output_buffer = head_buffer+output_buffer
+    
+    if (write):
+        outfile = output_folder + "/" + output_file
+        with open(outfile, "wb") as output:
+            output.write(output_buffer)
+            output.close()
+    
+    return output_buffer
+
+
+def unpack_file(input_buffer, output_folder, output_name, recurse):
+    output_folder = output_folder+"/"+output_name+"/"
     key = input_buffer[0x08:0x08+ru32(input_buffer,0x04)]
     file_pos = 0x08+len(key) # Set up XOR decryption
     section_size = []
@@ -182,8 +361,10 @@ def unpack_file(input_buffer, output_folder, output_name):
 
         if (file_props[i][2] % 0x10 == 2): # Use properties to select decompression algorithm
             decomp_file = de_lzw(curfile)
-        else:
+        elif (file_props[i][2] % 0x10 == 1):
             decomp_file = de_rle(curfile)
+        else:
+            decomp_file = curfile
         
         filename = output_folder + filename # Write the output files
         if (type(decomp_file) is bytearray and len(decomp_file) > 0):
@@ -191,13 +372,13 @@ def unpack_file(input_buffer, output_folder, output_name):
                 output.write(decomp_file)
                 output.close()
             
-            if (Path(filename).suffix == ".PAK"): # And now, unpacking within unpacking awaits you
-                unpack_file(decomp_file, f"{Path(filename).parent}", Path(filename).stem)
+            if (recurse and Path(filename).suffix == ".PAK"): # And now, unpacking within unpacking awaits you
+                unpack_file(decomp_file, f"{Path(filename).parent}", Path(filename).stem+"_decompressed", recurse)
     
-    return 0
+    return decomp_file
 
 
-def xxxtract(index_buffer, data_buffer, output_folder, def_name):
+def xxxtract(index_buffer, data_buffer, output_folder, def_name, recurse):
     index_start = 0
     data_pos = 0
     files = len(index_buffer) // 4
@@ -235,7 +416,7 @@ def xxxtract(index_buffer, data_buffer, output_folder, def_name):
             output.close()
         
         if (curfile[0:4] == b"PACK"): # If the file's packed, let's unpack it
-            unpack_file(curfile, output_folder, Path(file_name).stem)
+            unpack_file(curfile, output_folder, Path(file_name).stem+"_decompressed", recurse)
             
     print(f"File successfully extracted to {output_folder}!")
     return 0
@@ -243,8 +424,8 @@ def xxxtract(index_buffer, data_buffer, output_folder, def_name):
 
 parser = argparse.ArgumentParser(description='xxxHOLiC (PS2) File Extractor')
 parser.add_argument("inpath", help="File Input (BIN/HD/PAK)")
-parser.add_argument("-o", "--outpath", type=str, default="", help="Optional. The name used for the output folder.")
-parser.add_argument("-r", "--recurse", type=bool, default=True, help="Do not extract packed files within the given file.")
+parser.add_argument("-o", "--outpath", type=str, default="", help="Optional. The name used for the output folder or file.")
+parser.add_argument("-r", "--recurse", action="store_true", default=False, help="Extract/rebuild packed files within the given file.")
 
 args = parser.parse_args()
 hdfile = None
@@ -270,8 +451,8 @@ if Path(args.inpath).is_file() and not Path(args.inpath).is_dir():
             print(f"Could not find HD file for {args.inpath}!")
             quit()
     elif Path(args.inpath).suffix == ".pak": # Except packed files. These don't come in pairs
-        print(f"Found packed file {pakfile}!")
         pakfile = args.inpath
+        print(f"Packed file detected!")
     else:
         print(f"File has unrecognized extension!")
         quit()
@@ -279,10 +460,10 @@ if Path(args.inpath).is_file() and not Path(args.inpath).is_dir():
     outpath = "./"
     if len(args.outpath) > 0: # Outpath takes priority!!
         outpath += args.outpath
-        if not outpath.endswith("/"):
-            outpath += "/"
     else:
         outpath = (f"{Path(args.inpath).parent}/{Path(args.inpath).stem}")
+        if (pakfile != None):
+            outpath += "_decompressed"
     if not outpath.endswith("/"):
         outpath += "/"
     
@@ -293,14 +474,40 @@ if Path(args.inpath).is_file() and not Path(args.inpath).is_dir():
     if pakfile != None: # If we have a packed file, let's get unpacking
         with open(pakfile, "rb") as packed_file:
             pack_buffer = bytearray( packed_file.read() )
-            print(f"Successfully opened {packed_file}!")
-            unpack_file(pack_buffer, output_folder, output_file)
+            print(f"Successfully opened {pakfile}!")
+            unpack_file(pack_buffer, output_folder, output_file, args.recurse)
     else: # Otherwise, let's get extracting
         with open(hdfile, "rb") as index_file:
             with open(binfile, "rb") as data_file:
                 index_buffer = bytearray( index_file.read() )
                 data_buffer = bytearray( data_file.read() )
                 print(f"Successfully opened {binfile}!")
-                xxxtract(index_buffer, data_buffer, output_folder, output_file)
+                xxxtract(index_buffer, data_buffer, output_folder, output_file, args.recurse)
                 data_file.close()
             index_file.close()
+else:
+    if Path(args.inpath).is_dir():
+        infolder = Path(args.inpath)
+        output_folder = "./"
+        output_file = infolder.stem.rsplit("_",1)[0] # Remove "_decompressed"
+    
+        if len(args.outpath) > 0: # Outpath takes priority!!
+            output_file = args.outpath
+            if (output_file.find("/") >= 0):
+                output_folder = output_file.rsplit("/",1)[0]+"/" # Split output into folder and filename
+                output_file = output_file.rsplit("/",1)[1]
+        if (infolder.stem.find("_decompressed") and output_file.find(".") < 0):
+            output_file = f"{output_file}.pak" # Add suffix if necessary
+        else:
+            if (output_file.find(".") < 0):
+                output_file = f"{output_file}.bin"
+        print(output_file)
+        Path(output_folder).mkdir(parents=True,exist_ok=True)
+        
+        if (Path(args.inpath+"/FILENAME.LST").is_file()):
+            buildholic(args.inpath, output_folder, output_file, args.recurse)
+        else:
+            repack_file(args.inpath, output_folder, output_file, args.recurse)
+    else:
+        print("Unable to find input file/folder!")
+        quit()
