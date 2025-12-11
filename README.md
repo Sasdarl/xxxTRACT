@@ -1,5 +1,5 @@
 # xxxTRACT
- A Python script capable of decompressing .BIN/.PAK files used in xxxHOLiC: Watanuki no Izayoi Sowa (PS2).
+ A Python script capable of extracting and rebuilding .BIN/.PAK files used in xxxHOLiC: Watanuki no Izayoi Sowa (PS2).
 
 Optional parameters:
 
