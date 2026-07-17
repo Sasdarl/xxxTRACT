@@ -349,7 +349,7 @@ def repack_file(input_folder, output_folder, output_file, recurse, write=True):
     with open(input_folder+"/packfiles.lst", "rb") as list_file:
         list_buffer = bytearray( list_file.read() )
         for j in range(0, len(list_buffer), 0x40): # Serialize our file properties
-            filenames.append(list_buffer[j:j+0x20].decode("utf-8").rstrip("\x00"))
+            filenames.append(list_buffer[j:j+0x20].decode("shift_jis").rstrip("\x00"))
             file_props.append([ru32(list_buffer, j+0x30),
             ru32(list_buffer, j+0x34),ru32(list_buffer, j+0x3C)])
         list_file.close()
@@ -433,7 +433,7 @@ def unpack_file(input_buffer, output_folder, output_name, recurse):
     
     file_pos += data_size
     for j in range(0, len(listfile), 0x40): # Serialize our file properties
-        filenames.append(listfile[j:j+0x20].decode("utf-8").rstrip("\x00"))
+        filenames.append(listfile[j:j+0x20].decode("shift_jis").rstrip("\x00"))
         file_props.append([ru32(listfile, j+0x30),
         ru32(listfile, j+0x34),ru32(listfile, j+0x3C)])
 
@@ -486,7 +486,7 @@ def xxxtract(index_buffer, data_buffer, output_folder, def_name, recurse):
     
     if (data_buffer[0:8] == b"FILENAME"): # BIN files start with a file list
         filename_len = ru32(index_buffer,0x00)
-        filenames = data_buffer[0:filename_len].decode("utf-8")
+        filenames = data_buffer[0:filename_len].decode("shift_jis")
         filenames = filenames.splitlines() # We treat this separately to get filenames and file properties
 
         index_start += 1
